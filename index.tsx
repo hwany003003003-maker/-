@@ -4,6 +4,8 @@ import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Type } from "@google/genai";
 
 // --- Types ---
+type Difficulty = 'Beginner' | 'Intermediate' | 'Advanced';
+
 interface Example {
   english: string;
   korean: string;
@@ -17,49 +19,100 @@ interface WordData {
 }
 
 const App: React.FC = () => {
+  const [difficulty, setDifficulty] = useState<Difficulty>('Intermediate');
   const [currentWord, setCurrentWord] = useState<string>("");
   const [wordData, setWordData] = useState<WordData | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [userInput, setUserInput] = useState<string>("");
   const [practiceTexts, setPracticeTexts] = useState<string[]>(new Array(10).fill(""));
   const [hiddenStates, setHiddenStates] = useState<boolean[]>(new Array(10).fill(false));
+  const [feedbackTexts, setFeedbackTexts] = useState<string[]>(new Array(10).fill(""));
+  const [fetchingFeedback, setFetchingFeedback] = useState<boolean[]>(new Array(10).fill(false));
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [copyStatus, setCopyStatus] = useState<string>("");
+  const [apiStatus, setApiStatus] = useState<'IDLE' | 'ERROR' | 'OK'>('IDLE');
 
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+  const getAi = () => {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) return null;
+    return new GoogleGenAI({ apiKey });
+  };
 
-  const defaultWords = ["Persistent", "Resilience", "Eloquent", "Meticulous", "Ambiguous", "Vibrant", "Pragmatic", "Inevitably", "Compromise", "Paradigm"];
+  const wordPool: Record<Difficulty, string[]> = {
+    Beginner: ["Friend", "Journey", "Happy", "Future", "Experience", "Believe", "Success", "Important", "Common", "Simple"],
+    Intermediate: ["Persistent", "Resilience", "Eloquent", "Meticulous", "Ambiguous", "Vibrant", "Pragmatic", "Inevitably", "Compromise", "Paradigm"],
+    Advanced: ["Ephemeral", "Ubiquitous", "Deleterious", "Obfuscate", "Pragmatic", "Quixotic", "Surreptitious", "Vicarious", "Zealous", "Equanimity"]
+  };
 
   useEffect(() => {
+    if (!process.env.API_KEY) {
+      setApiStatus('ERROR');
+    } else {
+      setApiStatus('OK');
+    }
+
     window.addEventListener('beforeinstallprompt', (e) => {
       e.preventDefault();
       setDeferredPrompt(e);
     });
-    handleAutoRecommend();
+
+    handleAutoRecommend('Intermediate');
   }, []);
+
+  const handleCopyLink = () => {
+    const url = window.location.href;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(() => {
+        setCopyStatus("주소가 복사되었습니다!");
+        setTimeout(() => setCopyStatus(""), 2000);
+      }).catch(() => {
+        alert("복사 실패. 주소창의 링크를 직접 복제해주세요.");
+      });
+    } else {
+      const textArea = document.createElement("textarea");
+      textArea.value = url;
+      document.body.appendChild(textArea);
+      textArea.select();
+      try {
+        document.execCommand('copy');
+        setCopyStatus("주소가 복사되었습니다!");
+        setTimeout(() => setCopyStatus(""), 2000);
+      } catch (err) {
+        alert("복사 실패.");
+      }
+      document.body.removeChild(textArea);
+    }
+  };
 
   const handleInstallClick = async () => {
     if (deferredPrompt) {
       deferredPrompt.prompt();
       const { outcome } = await deferredPrompt.userChoice;
-      if (outcome === 'accepted') {
-        setDeferredPrompt(null);
-      }
+      if (outcome === 'accepted') setDeferredPrompt(null);
     } else {
-      alert("브라우저 메뉴에서 '홈 화면에 추가' 또는 '설치'를 선택해주세요!");
+      alert("스마트폰 브라우저 메뉴의 '홈 화면에 추가'를 이용하시면 APK 설치와 동일하게 사용 가능합니다!");
     }
   };
 
-  const fetchWordDetails = async (word: string) => {
+  const fetchWordDetails = async (word: string, currentDiff: Difficulty = difficulty) => {
+    const ai = getAi();
+    if (!ai) {
+      alert("API 키가 유효하지 않습니다.");
+      return;
+    }
+
     setLoading(true);
     setPracticeTexts(new Array(10).fill(""));
     setHiddenStates(new Array(10).fill(false));
+    setFeedbackTexts(new Array(10).fill(""));
 
     try {
       const response = await ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Provide 10 high-quality example sentences for the English word "${word}". 
-        For each sentence, provide the English sentence, the Korean translation, the specific nuance/meaning of "${word}" in that context, and a short grammar tip.`,
+        contents: `English word: "${word}". Level: "${currentDiff}".
+        Provide 10 examples in JSON: {word: string, examples: [{english, korean, meaning, grammar}]}.
+        Keep "meaning" and "grammar" brief in Korean.`,
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -89,24 +142,47 @@ const App: React.FC = () => {
       setWordData(data);
       setCurrentWord(data.word);
     } catch (error) {
-      console.error("Error fetching word details:", error);
-      alert("데이터를 가져오는 중 오류가 발생했습니다.");
+      console.error("Fetch error:", error);
+      alert("문장 생성에 실패했습니다. 단어를 직접 입력해 보거나 잠시 후 다시 시도해 주세요.");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleAutoRecommend = () => {
-    const randomWord = defaultWords[Math.floor(Math.random() * defaultWords.length)];
-    fetchWordDetails(randomWord);
+  const requestFeedback = async (index: number) => {
+    const ai = getAi();
+    if (!ai || !wordData || !practiceTexts[index]) return;
+
+    const newFetching = [...fetchingFeedback];
+    newFetching[index] = true;
+    setFetchingFeedback(newFetching);
+
+    try {
+      const original = wordData.examples[index].english;
+      const userText = practiceTexts[index];
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: `Original: "${original}" / User: "${userText}". 
+        In 1 short Korean sentence, why is the user's sentence different?`,
+      });
+
+      const newFeedback = [...feedbackTexts];
+      newFeedback[index] = response.text || "분석 불가";
+      setFeedbackTexts(newFeedback);
+    } catch (error) {
+      console.error("Feedback error:", error);
+    } finally {
+      const finalFetching = [...fetchingFeedback];
+      finalFetching[index] = false;
+      setFetchingFeedback(finalFetching);
+    }
   };
 
-  const handleCustomSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (userInput.trim()) {
-      fetchWordDetails(userInput.trim());
-      setUserInput("");
-    }
+  const handleAutoRecommend = (diff: Difficulty = difficulty) => {
+    const pool = wordPool[diff];
+    const randomWord = pool[Math.floor(Math.random() * pool.length)];
+    fetchWordDetails(randomWord, diff);
   };
 
   const toggleHidden = (index: number) => {
@@ -115,142 +191,125 @@ const App: React.FC = () => {
     setHiddenStates(newStates);
   };
 
-  // --- 문장 비교 로직 ---
   const calculateAccuracy = (original: string, input: string) => {
     if (!input.trim()) return 0;
-    
-    // 특수문자 제거 및 소문자 변환
     const clean = (str: string) => str.toLowerCase().replace(/[.,!?;:]/g, "").trim();
     const s1 = clean(original);
     const s2 = clean(input);
-    
     if (s1 === s2) return 100;
-    
     const words1 = s1.split(/\s+/);
     const words2 = s2.split(/\s+/);
-    
     let matches = 0;
-    words2.forEach(word => {
-      if (words1.includes(word)) matches++;
-    });
-    
-    const accuracy = Math.round((matches / Math.max(words1.length, words2.length)) * 100);
-    return Math.min(accuracy, 100);
+    words2.forEach(word => { if (words1.includes(word)) matches++; });
+    return Math.round((matches / Math.max(words1.length, words2.length)) * 100);
   };
 
   return (
-    <div className="min-h-screen bg-[#FDFCF0] text-[#4A4A4A] font-sans">
-      <header className="bg-white border-b border-[#E8E4D1] p-4 sticky top-0 z-30 shadow-sm flex justify-between items-center">
-        <button 
-          onClick={handleInstallClick}
-          className="bg-[#6B8E23] text-white text-[10px] font-black px-3 py-1.5 rounded-full shadow-lg shadow-green-100 animate-bounce"
-        >
-          앱 다운로드
-        </button>
-        <h1 className="text-lg font-black text-[#6B8E23] tracking-tighter">오늘의 단어장</h1>
-        <button 
-          onClick={() => setIsGuideOpen(true)}
-          className="w-8 h-8 rounded-full bg-gray-50 flex items-center justify-center text-gray-400 font-bold"
-        >
-          ?
-        </button>
+    <div className="min-h-screen flex flex-col">
+      <header className="bg-white border-b border-gray-100 p-4 sticky top-0 z-40 flex justify-between items-center shadow-sm">
+        <div className="flex flex-col">
+          <h1 className="text-xl font-black text-[#6B8E23]">오늘의 단어장</h1>
+          <div className="flex items-center gap-1">
+            <div className={`w-1.5 h-1.5 rounded-full ${apiStatus === 'OK' ? 'bg-green-500' : 'bg-red-500'}`}></div>
+            <span className="text-[8px] font-bold text-gray-400 uppercase tracking-tighter">AI Network Connected</span>
+          </div>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={handleCopyLink} className="bg-[#6B8E23] text-white text-[11px] font-bold px-4 py-2 rounded-full shadow-lg active:scale-95 transition-all">
+            🔗 주소 복사
+          </button>
+          <button onClick={() => setIsGuideOpen(true)} className="w-9 h-9 rounded-full bg-gray-50 flex items-center justify-center text-gray-400 font-black border border-gray-100">?</button>
+        </div>
       </header>
 
-      <main className="max-w-2xl mx-auto px-4 pt-6 pb-24">
-        <section className="bg-white rounded-[2.5rem] p-8 shadow-xl shadow-gray-200/50 border border-[#E8E4D1] mb-8 relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-full h-1 bg-[#6B8E23]"></div>
-          <div className="text-center">
-            <span className="text-[10px] font-black text-[#A4C639] uppercase tracking-widest mb-2 block">Vocabulary of the Day</span>
-            <h2 className="text-5xl font-black text-[#333] mb-8 lowercase italic">
-              {loading ? "..." : currentWord || "Ready"}
-            </h2>
+      {copyStatus && (
+        <div className="fixed top-24 left-1/2 -translate-x-1/2 z-50 bg-black/80 text-white text-[11px] font-bold px-6 py-2 rounded-full animate-in">
+          {copyStatus}
+        </div>
+      )}
 
-            <form onSubmit={handleCustomSubmit} className="flex flex-col gap-3">
-              <input
-                type="text"
-                value={userInput}
-                onChange={(e) => setUserInput(e.target.value)}
-                placeholder="어떤 단어를 공부해볼까요?"
-                className="w-full px-6 py-4 bg-[#F9F9F9] border-none rounded-2xl focus:ring-2 focus:ring-[#A4C639] transition-all text-sm placeholder:text-gray-300"
-              />
-              <div className="grid grid-cols-2 gap-2">
-                <button type="submit" className="bg-[#6B8E23] text-white py-4 rounded-2xl font-bold hover:bg-[#556B2F] active:scale-95 transition-all shadow-md">학습 시작</button>
-                <button type="button" onClick={handleAutoRecommend} className="bg-white text-[#6B8E23] border-2 border-[#6B8E23] py-4 rounded-2xl font-bold active:scale-95 transition-all">랜덤 추천</button>
-              </div>
-            </form>
+      <main className="flex-1 max-w-2xl mx-auto w-full px-4 pt-6 pb-20">
+        <section className="bg-white rounded-[2.5rem] p-8 shadow-xl border border-gray-50 mb-8 text-center relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-1.5 bg-[#6B8E23]"></div>
+          
+          <div className="flex justify-center mb-6">
+            <div className="bg-gray-100 p-1 rounded-2xl flex gap-1">
+              {(['Beginner', 'Intermediate', 'Advanced'] as Difficulty[]).map((level) => (
+                <button
+                  key={level}
+                  onClick={() => { setDifficulty(level); handleAutoRecommend(level); }}
+                  className={`px-4 py-2 rounded-xl text-[10px] font-black transition-all ${difficulty === level ? "bg-white text-[#6B8E23] shadow-sm" : "text-gray-400"}`}
+                >
+                  {level === 'Beginner' ? '초급' : level === 'Intermediate' ? '중급' : '고급'}
+                </button>
+              ))}
+            </div>
           </div>
+
+          <span className="text-[10px] font-black text-[#A4C639] uppercase tracking-[0.2em] mb-3 block">STUDY WORD</span>
+          <h2 className="text-5xl font-black text-[#333] mb-8 lowercase italic min-h-[60px] flex items-center justify-center">
+            {loading ? <div className="w-8 h-8 border-4 border-gray-100 border-t-[#6B8E23] rounded-full animate-spin"></div> : currentWord || "Ready"}
+          </h2>
+
+          <form onSubmit={(e) => { e.preventDefault(); if(userInput.trim()) fetchWordDetails(userInput.trim()); }} className="space-y-3">
+            <input
+              type="text"
+              value={userInput}
+              onChange={(e) => setUserInput(e.target.value)}
+              placeholder="직접 단어를 입력하세요"
+              className="w-full px-6 py-4 bg-[#F9F9F9] border-none rounded-2xl focus:ring-2 focus:ring-[#6B8E23] text-sm placeholder:text-gray-300"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <button type="submit" className="bg-[#6B8E23] text-white py-4 rounded-2xl font-black text-sm active:scale-95 transition-all">학습 시작</button>
+              <button type="button" onClick={() => handleAutoRecommend()} className="bg-white text-[#6B8E23] border-2 border-[#6B8E23] py-4 rounded-2xl font-black text-sm active:scale-95 transition-all">추천 단어</button>
+            </div>
+          </form>
         </section>
-
-        {loading && (
-          <div className="flex flex-col items-center justify-center py-20 space-y-4">
-            <div className="w-10 h-10 border-4 border-[#F0F4E1] border-t-[#6B8E23] rounded-full animate-spin"></div>
-            <p className="text-xs font-bold text-[#6B8E23]">AI가 문장을 구성하고 있습니다...</p>
-          </div>
-        )}
 
         {!loading && wordData && (
           <div className="space-y-4">
             {wordData.examples.map((item, idx) => {
               const accuracy = calculateAccuracy(item.english, practiceTexts[idx]);
-              
               return (
-                <div key={idx} className="bg-white rounded-[2rem] p-6 border border-[#E8E4D1] shadow-sm animate-in" style={{animationDelay: `${idx * 0.1}s`}}>
-                  <div className="flex justify-between items-start mb-4">
-                    <div className="w-8 h-8 bg-[#F0F4E1] rounded-full flex items-center justify-center text-[#6B8E23] text-xs font-black">
-                      {idx + 1}
-                    </div>
-                    <button
-                      onClick={() => toggleHidden(idx)}
-                      className={`text-[10px] font-black px-4 py-2 rounded-xl transition-all ${
-                        hiddenStates[idx] 
-                        ? "bg-[#6B8E23] text-white" 
-                        : "bg-gray-100 text-gray-500 hover:bg-gray-200"
-                      }`}
-                    >
-                      {hiddenStates[idx] ? "답안 보기" : "문장 가리기"}
+                <div key={idx} className="bg-white rounded-[2rem] p-6 border border-gray-100 shadow-sm animate-in" style={{animationDelay: `${idx * 0.1}s`}}>
+                  <div className="flex justify-between items-center mb-4">
+                    <span className="text-[10px] font-black text-gray-300">EXAMPLE {idx + 1}</span>
+                    <button onClick={() => toggleHidden(idx)} className={`text-[10px] font-black px-4 py-2 rounded-xl ${hiddenStates[idx] ? "bg-[#6B8E23] text-white" : "bg-gray-100 text-gray-500"}`}>
+                      {hiddenStates[idx] ? "정답 보기" : "가리고 외우기"}
                     </button>
                   </div>
 
-                  <div className="mb-6">
+                  <div className="mb-6 min-h-[60px]">
                     {hiddenStates[idx] ? (
-                      <div className="space-y-3">
-                        <textarea
-                          className="w-full p-4 bg-gray-50 border-2 border-dashed border-gray-200 rounded-2xl text-base focus:outline-none placeholder:text-gray-300"
-                          placeholder="이 문장을 외워서 적어보세요..."
-                          rows={2}
-                          value={practiceTexts[idx]}
-                          onChange={(e) => {
-                            const newTexts = [...practiceTexts];
-                            newTexts[idx] = e.target.value;
-                            setPracticeTexts(newTexts);
-                          }}
-                        />
-                      </div>
+                      <textarea
+                        className="w-full p-4 bg-gray-50 border-2 border-dashed border-gray-200 rounded-2xl text-base focus:outline-none placeholder:text-gray-300"
+                        placeholder="문장을 외워서 입력..."
+                        rows={2}
+                        value={practiceTexts[idx]}
+                        onChange={(e) => { const nt = [...practiceTexts]; nt[idx] = e.target.value; setPracticeTexts(nt); }}
+                      />
                     ) : (
                       <div className="space-y-4">
-                        <div>
-                          <span className="text-[9px] font-black text-gray-300 uppercase block mb-1 tracking-tighter">Original Sentence</span>
-                          <p className="text-xl font-medium text-[#333] leading-snug">
-                            {item.english}
-                          </p>
-                        </div>
-                        
-                        {/* 문장 비교 결과 섹션 */}
+                        <p className="text-xl font-bold text-[#333] leading-snug">{item.english}</p>
                         {practiceTexts[idx] && (
-                          <div className={`p-4 rounded-2xl border-2 animate-in ${accuracy === 100 ? 'bg-green-50 border-green-100' : 'bg-orange-50 border-orange-100'}`}>
-                            <div className="flex justify-between items-center mb-2">
-                              <span className="text-[9px] font-black text-gray-400 uppercase tracking-tighter">Your Practice</span>
+                          <div className={`p-4 rounded-2xl border-2 ${accuracy === 100 ? 'bg-green-50 border-green-100' : 'bg-orange-50 border-orange-100'}`}>
+                            <div className="flex justify-between items-center mb-1">
+                              <span className="text-[10px] font-black text-gray-400 uppercase tracking-tighter">My Practice</span>
                               <span className={`text-[10px] font-black px-2 py-0.5 rounded-full ${accuracy === 100 ? 'bg-green-500 text-white' : 'bg-orange-500 text-white'}`}>
-                                {accuracy === 100 ? '완벽해요! ✨' : `일치율 ${accuracy}%`}
+                                {accuracy === 100 ? 'PERFECT' : `Acc: ${accuracy}%`}
                               </span>
                             </div>
-                            <p className={`text-sm italic ${accuracy === 100 ? 'text-green-700' : 'text-orange-700'}`}>
-                              "{practiceTexts[idx]}"
-                            </p>
+                            <p className="text-sm italic text-gray-700">"{practiceTexts[idx]}"</p>
                             {accuracy < 100 && (
-                              <p className="text-[10px] text-orange-400 mt-2 font-medium leading-tight">
-                                💡 원본과 조금 달라요! 다시 한번 확인해볼까요?
-                              </p>
+                              <div className="mt-4 pt-3 border-t border-orange-100">
+                                {feedbackTexts[idx] ? (
+                                  <p className="text-xs text-orange-700 font-bold">💡 {feedbackTexts[idx]}</p>
+                                ) : (
+                                  <button onClick={() => requestFeedback(idx)} disabled={fetchingFeedback[idx]} className="text-[10px] font-black text-orange-500">
+                                    {fetchingFeedback[idx] ? "분석 중..." : "🤖 왜 틀렸을까요? 분석"}
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </div>
                         )}
@@ -259,19 +318,10 @@ const App: React.FC = () => {
                   </div>
 
                   <div className="pt-5 border-t border-gray-50 space-y-3">
-                    <div>
-                      <span className="text-[10px] font-black text-gray-300 uppercase block mb-1">Interpretation</span>
-                      <p className="text-sm font-medium text-[#555]">{item.korean}</p>
-                    </div>
-                    <div className="flex gap-4">
-                      <div className="flex-1">
-                        <span className="text-[10px] font-black text-gray-300 uppercase block mb-1">Context</span>
-                        <p className="text-[11px] text-[#6B8E23] font-bold">{item.meaning}</p>
-                      </div>
-                      <div className="flex-1">
-                        <span className="text-[10px] font-black text-gray-300 uppercase block mb-1">Grammar</span>
-                        <p className="text-[11px] text-[#8B4513] font-medium">{item.grammar}</p>
-                      </div>
+                    <p className="text-sm font-bold text-gray-600">{item.korean}</p>
+                    <div className="flex gap-2">
+                      <span className="bg-[#6B8E23]/10 text-[#6B8E23] text-[10px] font-bold px-2 py-1 rounded-md">{item.meaning}</span>
+                      <span className="bg-orange-50 text-orange-600 text-[10px] font-bold px-2 py-1 rounded-md">{item.grammar}</span>
                     </div>
                   </div>
                 </div>
@@ -281,50 +331,29 @@ const App: React.FC = () => {
         )}
       </main>
 
-      {/* Guide Modal */}
       {isGuideOpen && (
-        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm p-0 sm:p-4">
-          <div className="bg-white w-full sm:max-w-md rounded-t-[2.5rem] sm:rounded-[2.5rem] p-8 animate-in shadow-2xl overflow-y-auto max-h-[90vh]">
-            <h3 className="text-2xl font-black text-[#333] mb-6">설치 및 학습 가이드</h3>
-            <div className="space-y-6 text-sm text-gray-600">
-              <div className="p-4 bg-yellow-50 rounded-2xl border border-yellow-100 mb-2">
-                <p className="text-xs font-bold text-yellow-700 mb-1">현재 주소 (임시):</p>
-                <code className="text-[10px] break-all block bg-white p-2 rounded border border-yellow-200">{window.location.href}</code>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="bg-white w-full max-w-sm rounded-[2.5rem] p-8 animate-in shadow-2xl">
+            <h3 className="text-2xl font-black text-[#333] mb-6">앱 설치 및 사용 가이드</h3>
+            <div className="space-y-5 text-sm">
+              <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100">
+                <p className="text-[11px] font-black text-[#6B8E23] mb-1">공유용 주소:</p>
+                <code className="text-[10px] break-all block text-gray-400">{window.location.href}</code>
               </div>
-
-              <div className="flex gap-4 items-start">
-                <div className="w-6 h-6 rounded-lg bg-green-100 text-[#6B8E23] flex-shrink-0 flex items-center justify-center font-bold">🎯</div>
-                <div>
-                  <p className="font-bold text-[#333]">일치 확인 기능</p>
-                  <p className="text-xs mt-1">문장을 입력하고 <b>'답안 보기'</b>를 누르면 AI가 원본과 얼마나 일치하는지 자동으로 계산해줍니다.</p>
-                </div>
-              </div>
-              
-              <div className="flex gap-4 items-start">
-                <div className="w-6 h-6 rounded-lg bg-green-100 text-[#6B8E23] flex-shrink-0 flex items-center justify-center font-bold">📱</div>
-                <div>
-                  <p className="font-bold text-[#333]">스마트폰 앱으로 저장</p>
-                  <p className="text-xs mt-1">상단의 <b>[앱 다운로드]</b>를 누르거나 브라우저 메뉴에서 <b>'홈 화면에 추가'</b>를 선택하세요.</p>
-                </div>
-              </div>
+              <p className="text-gray-600 leading-relaxed">
+                <b>1. 앱 설치 방법:</b> 이 주소를 스마트폰 브라우저에서 열고 <b>'홈 화면에 추가'</b>를 누르세요. 바탕화면에 아이콘이 생성됩니다.<br/><br/>
+                <b>2. 학습 방법:</b> '가리기' 버튼으로 문장을 숨기고 직접 타이핑하며 외워보세요. AI가 일치율과 틀린 이유를 분석해줍니다.
+              </p>
             </div>
-            <button 
-              onClick={() => setIsGuideOpen(false)}
-              className="w-full mt-10 bg-[#6B8E23] text-white py-4 rounded-2xl font-bold active:scale-95 transition-all"
-            >
-              확인했습니다
-            </button>
+            <button onClick={() => setIsGuideOpen(false)} className="w-full mt-8 bg-[#333] text-white py-4 rounded-2xl font-bold active:scale-95 transition-all">이해했습니다</button>
           </div>
         </div>
       )}
 
       {deferredPrompt && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 w-[90%] max-w-sm">
-          <button 
-            onClick={handleInstallClick}
-            className="w-full bg-[#333] text-white py-4 rounded-2xl font-bold shadow-2xl flex items-center justify-center gap-2 animate-in"
-          >
-            <span>✨</span> 전용 앱으로 소장하기
+          <button onClick={handleInstallClick} className="w-full bg-[#6B8E23] text-white py-5 rounded-2xl font-black shadow-2xl animate-bounce">
+            ✨ 전용 앱으로 홈 화면에 설치하기
           </button>
         </div>
       )}
@@ -332,8 +361,7 @@ const App: React.FC = () => {
   );
 };
 
-const container = document.getElementById('root');
-if (container) {
-  const root = createRoot(container);
-  root.render(<App />);
+const rootElement = document.getElementById('root');
+if (rootElement) {
+  createRoot(rootElement).render(<App />);
 }
